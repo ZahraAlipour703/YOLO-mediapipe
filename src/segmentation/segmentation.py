@@ -2,195 +2,265 @@
 segmentation.py
 ===============
 
-Segment Anything (SAM) Hand Segmentation
+Hand segmentation module.
 
-This module performs hand segmentation using Meta's Segment Anything Model.
-YOLO bounding boxes are used as prompts to SAM.
+This file provides a unified interface for generating hand masks after
+YOLO detects the hand bounding box.
 
-Pipeline
---------
-Frame
-   │
-YOLO Detection
-   │
-Bounding Box
-   │
-SAM Predictor
-   │
-Binary Mask
-   │
-Overlay / Cropped Hand
+Supported methods
+-----------------
+1. Segment Anything Model (SAM)
+2. YOLOv8 Segmentation
 
-Author:
-    Zahra Alipour
+Author: Zahra Alipour
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import cv2
 import numpy as np
-from segment_anything import SamPredictor, sam_model_registry
+
+LOGGER = logging.getLogger(__name__)
 
 
 class HandSegmenter:
     """
-    Segment hands using SAM.
+    Hand segmentation using SAM or YOLO segmentation.
 
     Parameters
     ----------
+    model_path : str
+        Path to segmentation model.
     model_type : str
-        SAM backbone (vit_b, vit_l, vit_h)
-
-    checkpoint : str
-        Path to SAM checkpoint.
-
-    device : str
-        cpu or cuda
+        "sam" or "yolo".
     """
 
     def __init__(
         self,
-        checkpoint: str,
-        model_type: str = "vit_b",
-        device: str = "cpu",
-    ):
+        model_path: str,
+        model_type: str = "sam",
+    ) -> None:
 
-        checkpoint = Path(checkpoint)
+        self.model_type = model_type.lower()
+        self.model_path = Path(model_path)
 
-        if not checkpoint.exists():
-            raise FileNotFoundError(checkpoint)
+        self.model = None
 
-        sam = sam_model_registry[model_type](
-            checkpoint=str(checkpoint)
-        )
+        self._load_model()
 
-        sam.to(device)
+    ####################################################################
+    # Model Loading
+    ####################################################################
 
-        self.predictor = SamPredictor(sam)
-
-    # ----------------------------------------------------------
-
-    def predict(
-        self,
-        image: np.ndarray,
-        boxes: List[List[int]],
-    ) -> List[np.ndarray]:
+    def _load_model(self) -> None:
         """
-        Generate masks for YOLO detections.
+        Load segmentation model.
+        """
+
+        if self.model_type == "sam":
+            self._load_sam()
+
+        elif self.model_type == "yolo":
+            self._load_yolo_seg()
+
+        else:
+            raise ValueError(
+                f"Unsupported segmentation model: {self.model_type}"
+            )
+
+    def _load_sam(self) -> None:
+        """
+        Load Segment Anything Model.
+        """
+
+        try:
+            from segment_anything import (
+                sam_model_registry,
+                SamPredictor,
+            )
+
+            sam = sam_model_registry["vit_b"](
+                checkpoint=str(self.model_path)
+            )
+
+            self.model = SamPredictor(sam)
+
+            LOGGER.info("SAM loaded successfully.")
+
+        except Exception as e:
+            LOGGER.error("Unable to load SAM.")
+            raise e
+
+    def _load_yolo_seg(self) -> None:
+        """
+        Load YOLO segmentation model.
+        """
+
+        try:
+            from ultralytics import YOLO
+
+            self.model = YOLO(str(self.model_path))
+
+            LOGGER.info("YOLO Segmentation model loaded.")
+
+        except Exception as e:
+            LOGGER.error("Unable to load YOLO segmentation.")
+            raise e
+
+    ####################################################################
+    # Public API
+    ####################################################################
+
+    def segment(
+        self,
+        frame: np.ndarray,
+        bbox: List[int],
+    ) -> Optional[np.ndarray]:
+        """
+        Generate segmentation mask.
 
         Parameters
         ----------
-        image
-            BGR frame
+        frame : ndarray
 
-        boxes
-            List of YOLO bounding boxes
+        bbox : [x1,y1,x2,y2]
 
         Returns
         -------
-        list[np.ndarray]
-            Binary masks
+        Binary mask.
         """
 
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if self.model_type == "sam":
+            return self._segment_sam(frame, bbox)
 
-        self.predictor.set_image(rgb)
+        return self._segment_yolo(frame, bbox)
 
-        masks = []
+    ####################################################################
+    # SAM
+    ####################################################################
 
-        for box in boxes:
+    def _segment_sam(
+        self,
+        frame: np.ndarray,
+        bbox: List[int],
+    ) -> Optional[np.ndarray]:
 
-            box = np.array(box)
+        x1, y1, x2, y2 = bbox
 
-            mask, scores, _ = self.predictor.predict(
-                box=box,
-                multimask_output=False,
-            )
+        self.model.set_image(frame)
 
-            masks.append(mask[0])
+        masks, scores, _ = self.model.predict(
+            box=np.array([x1, y1, x2, y2]),
+            multimask_output=False,
+        )
 
-        return masks
+        if len(masks) == 0:
+            return None
 
-    # ----------------------------------------------------------
+        return masks[0].astype(np.uint8)
+
+    ####################################################################
+    # YOLO Segmentation
+    ####################################################################
+
+    def _segment_yolo(
+        self,
+        frame: np.ndarray,
+    ) -> Optional[np.ndarray]:
+
+        results = self.model.predict(
+            frame,
+            verbose=False,
+        )
+
+        if len(results) == 0:
+            return None
+
+        result = results[0]
+
+        if result.masks is None:
+            return None
+
+        return result.masks.data[0].cpu().numpy().astype(np.uint8)
+
+    ####################################################################
+    # Utilities
+    ####################################################################
 
     @staticmethod
-    def overlay(
-        image: np.ndarray,
-        masks: List[np.ndarray],
-        alpha: float = 0.5,
+    def apply_mask(
+        frame: np.ndarray,
+        mask: np.ndarray,
     ) -> np.ndarray:
         """
-        Overlay masks on image.
+        Overlay segmentation mask.
+
+        Parameters
+        ----------
+        frame : ndarray
+
+        mask : ndarray
+
+        Returns
+        -------
+        Segmented image.
         """
 
-        output = image.copy()
+        colored = np.zeros_like(frame)
 
-        for mask in masks:
+        colored[:, :, 1] = mask * 255
 
-            color = np.random.randint(
-                0,
-                255,
-                size=3,
-                dtype=np.uint8,
-            )
-
-            colored = np.zeros_like(image)
-
-            colored[mask] = color
-
-            output = cv2.addWeighted(
-                output,
-                1.0,
-                colored,
-                alpha,
-                0,
-            )
-
-        return output
-
-    # ----------------------------------------------------------
+        return cv2.addWeighted(
+            frame,
+            0.75,
+            colored,
+            0.25,
+            0,
+        )
 
     @staticmethod
-    def crop_segments(
-        image: np.ndarray,
-        masks: List[np.ndarray],
-    ) -> List[np.ndarray]:
+    def crop_mask(
+        frame: np.ndarray,
+        mask: np.ndarray,
+    ) -> np.ndarray:
         """
-        Extract segmented hand images.
-        """
+        Return cropped hand.
 
-        segments = []
+        Parameters
+        ----------
+        frame : ndarray
 
-        for mask in masks:
+        mask : ndarray
 
-            result = np.zeros_like(image)
-
-            result[mask] = image[mask]
-
-            segments.append(result)
-
-        return segments
-
-    # ----------------------------------------------------------
-
-    @staticmethod
-    def save_masks(
-        masks: List[np.ndarray],
-        output_dir: str,
-    ) -> None:
-        """
-        Save binary masks.
+        Returns
+        -------
+        Cropped RGB image.
         """
 
-        output = Path(output_dir)
-        output.mkdir(parents=True, exist_ok=True)
+        return cv2.bitwise_and(
+            frame,
+            frame,
+            mask=mask.astype(np.uint8),
+        )
 
-        for i, mask in enumerate(masks):
 
-            cv2.imwrite(
-                str(output / f"mask_{i}.png"),
-                mask.astype(np.uint8) * 255,
-            )
+def build_segmenter(
+    model_path: str,
+    model_type: str = "sam",
+) -> HandSegmenter:
+    """
+    Factory function.
+
+    Returns
+    -------
+    HandSegmenter
+    """
+
+    return HandSegmenter(
+        model_path=model_path,
+        model_type=model_type,
+    )
