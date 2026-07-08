@@ -1,0 +1,30 @@
+project:
+  name: YOLO-MediaPipe-HandTracking
+  version: 1.0
+
+model:
+  weights: models/best.pt
+  confidence: 0.5
+  iou: 0.45
+  device: cpu
+
+mediapipe:
+  max_num_hands: 1
+  detection_confidence: 0.5
+  tracking_confidence: 0.5
+
+aruco:
+  dictionary: DICT_6X6_250
+  marker_length: 0.01
+
+input:
+  source: webcam
+  image_size: 640
+
+output:
+  save_video: true
+  save_csv: true
+  output_dir: outputs/
+
+logging:
+  level: INFO
