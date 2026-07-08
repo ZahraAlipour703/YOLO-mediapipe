@@ -6,10 +6,14 @@ High-level tracking pipeline.
 
 This module combines:
 
-1. YOLO Hand Detection
-2. MediaPipe Landmark Tracking
-3. ArUco Marker Pose Estimation
-4. Finger Joint Angle Calculation
+    • YOLO hand detection
+    • MediaPipe landmark estimation
+    • Temporal tracking
+    • Angle calculation
+
+It is responsible for processing one video frame and
+returning all information required by the visualization
+module.
 
 Author:
     Zahra Alipour
@@ -17,165 +21,236 @@ Author:
 
 from __future__ import annotations
 
-from typing import Dict, Any
+from dataclasses import dataclass
+from typing import List, Optional
+import time
 
 import cv2
 import numpy as np
 
 from src.detection.detector import YOLODetector
-from src.tracking.mediapipe_tracker import MediaPipeTracker
-from src.tracking.aruco_tracker import ArucoTracker
+from src.tracking.mediapipe_tracker import (
+    MediaPipeTracker,
+    HandLandmarks,
+)
 from src.geometry.angle_calculator import AngleCalculator
+
+
+# ---------------------------------------------------------
+# Data Structure
+# ---------------------------------------------------------
+
+
+@dataclass
+class TrackingResult:
+    """
+    Stores the result of one processed frame.
+    """
+
+    frame: np.ndarray
+
+    hands: List[HandLandmarks]
+
+    angles: Optional[dict]
+
+    fps: float
+
+
+# ---------------------------------------------------------
+# Tracker
+# ---------------------------------------------------------
 
 
 class HandTracker:
     """
-    Complete hand tracking pipeline.
+    Complete Hand Tracking Pipeline.
 
-    Workflow
-    --------
-    Frame
-      │
-      ▼
-    YOLO Detection
-      │
-      ▼
-    MediaPipe Landmarks
-      │
-      ▼
-    ArUco Pose Estimation
-      │
-      ▼
-    Joint Angle Calculation
-      │
-      ▼
-    Results
+    Pipeline
+
+        Frame
+          │
+          ▼
+        YOLO
+          │
+          ▼
+      Bounding Boxes
+          │
+          ▼
+      MediaPipe Hands
+          │
+          ▼
+       21 Landmarks
+          │
+          ▼
+     Joint Angle Calculation
+          │
+          ▼
+      Tracking Result
     """
 
     def __init__(
         self,
-        model_path: str,
-        confidence: float = 0.5,
+        detector: YOLODetector,
+        landmark_tracker: MediaPipeTracker,
+        angle_calculator: Optional[AngleCalculator] = None,
     ) -> None:
 
-        self.detector = YOLODetector(
-            model_path=model_path,
-            confidence=confidence,
-        )
+        self.detector = detector
 
-        self.landmark_tracker = MediaPipeTracker()
+        self.landmark_tracker = landmark_tracker
 
-        self.aruco_tracker = ArucoTracker()
+        self.angle_calculator = angle_calculator
 
-        self.angle_calculator = AngleCalculator()
+        self.previous_time = time.time()
 
-    # -------------------------------------------------------------
+    # -----------------------------------------------------
 
     def process(
         self,
         frame: np.ndarray,
-    ) -> Dict[str, Any]:
+    ) -> TrackingResult:
         """
-        Run the complete pipeline.
+        Process one frame.
 
         Parameters
         ----------
-        frame : ndarray
-            Input BGR frame.
+        frame
+            Input BGR image.
 
         Returns
         -------
-        dict
-            Detection results.
+        TrackingResult
         """
-
-        # -------------------------------------------------
-        # Step 1 : Detect hands
-        # -------------------------------------------------
 
         detections = self.detector.detect(frame)
 
-        boxes = [det.bbox for det in detections]
+        boxes = []
 
-        # -------------------------------------------------
-        # Step 2 : Estimate landmarks
-        # -------------------------------------------------
+        for det in detections:
+
+            boxes.append(det.bbox)
 
         hands = self.landmark_tracker.process(
             frame,
             boxes,
         )
 
-        # -------------------------------------------------
-        # Step 3 : Detect ArUco markers
-        # -------------------------------------------------
+        angles = None
 
-        markers = self.aruco_tracker.process(frame)
+        if self.angle_calculator is not None:
 
-        # -------------------------------------------------
-        # Step 4 : Compute joint angles
-        # -------------------------------------------------
+            angles = self.angle_calculator.calculate(hands)
 
-        angles = []
+        current = time.time()
 
-        for hand in hands:
+        fps = 1.0 / max(current - self.previous_time, 1e-6)
 
-            angle = self.angle_calculator.compute(
-                hand.landmarks
-            )
+        self.previous_time = current
 
-            angles.append(angle)
+        return TrackingResult(
 
-        # -------------------------------------------------
+            frame=frame,
 
-        return {
-            "detections": detections,
-            "hands": hands,
-            "markers": markers,
-            "angles": angles,
-        }
+            hands=hands,
 
-    # -------------------------------------------------------------
+            angles=angles,
+
+            fps=fps,
+
+        )
+
+    # -----------------------------------------------------
 
     def draw(
         self,
-        frame: np.ndarray,
-        results: Dict[str, Any],
+        result: TrackingResult,
     ) -> np.ndarray:
         """
-        Draw all tracking results.
+        Draw all tracking information.
+
+        Parameters
+        ----------
+        result
+
+        Returns
+        -------
+        Annotated frame.
         """
 
-        image = frame.copy()
-
-        image = self.detector.draw(
-            image,
-            results["detections"],
-        )
+        image = result.frame.copy()
 
         image = self.landmark_tracker.draw(
             image,
-            results["hands"],
+            result.hands,
         )
 
-        image = self.aruco_tracker.draw(
-            image,
-            results["markers"],
-        )
+        cv2.putText(
 
-        image = self.angle_calculator.draw(
             image,
-            results["hands"],
-            results["angles"],
+
+            f"FPS : {result.fps:.1f}",
+
+            (20, 40),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.8,
+
+            (0, 255, 0),
+
+            2,
+
         )
 
         return image
 
-    # -------------------------------------------------------------
+    # -----------------------------------------------------
 
-    def close(self) -> None:
+    def process_video(
+        self,
+        source: int | str = 0,
+    ) -> None:
         """
-        Release all resources.
+        Run real-time tracking.
+
+        Parameters
+        ----------
+        source
+
+            Webcam index or video path.
         """
 
-        self.landmark_tracker.close()
+        cap = cv2.VideoCapture(source)
+
+        if not cap.isOpened():
+
+            raise RuntimeError(
+                f"Cannot open video source: {source}"
+            )
+
+        while True:
+
+            success, frame = cap.read()
+
+            if not success:
+
+                break
+
+            result = self.process(frame)
+
+            output = self.draw(result)
+
+            cv2.imshow(
+                "YOLO + MediaPipe Tracking",
+                output,
+            )
+
+            key = cv2.waitKey(1)
+
+            if key == ord("q"):
+
+                break
+
+        cap.release()
+
+        cv2.destroyAllWindows()
