@@ -2,256 +2,294 @@
 preprocessing.py
 ================
 
-Dataset preparation utilities for the YOLO + MediaPipe Hand Tracking project.
+Image and Video Preprocessing Module
 
 Responsibilities
 ----------------
-1. Download dataset (optional)
-2. Extract ZIP archives
-3. Validate dataset structure
-4. Create YOLO dataset YAML
-5. Count images and labels
-6. Print dataset statistics
+• Read images/videos
+• Resize frames
+• Normalize images
+• Color conversions
+• CLAHE enhancement
+• ROI cropping
+• Video writer utilities
 
-Author:
+Author
+------
 Zahra Alipour
-
 """
 
 from __future__ import annotations
 
-import logging
-import shutil
-import zipfile
 from pathlib import Path
-from typing import Dict
+from typing import Generator, Optional, Tuple
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-LOGGER = logging.getLogger(__name__)
+import cv2
+import numpy as np
 
 
-class DatasetPreprocessor:
+class FrameProcessor:
     """
-    Dataset preparation class.
-
-    Parameters
-    ----------
-    dataset_dir : Path
-        Root dataset directory.
+    Handles all preprocessing operations before inference.
     """
 
-    def __init__(self, dataset_dir: str):
-
-        self.dataset_dir = Path(dataset_dir)
-
-        self.train_images = self.dataset_dir / "train/images"
-        self.train_labels = self.dataset_dir / "train/labels"
-
-        self.valid_images = self.dataset_dir / "valid/images"
-        self.valid_labels = self.dataset_dir / "valid/labels"
-
-        self.test_images = self.dataset_dir / "test/images"
-        self.test_labels = self.dataset_dir / "test/labels"
-
-    ####################################################################
-    # ZIP EXTRACTION
-    ####################################################################
-
-    def extract_zip(
+    def __init__(
         self,
-        zip_path: str,
-        output_dir: str
-    ) -> None:
-        """
-        Extract dataset zip.
-
-        Parameters
-        ----------
-        zip_path : str
-
-        output_dir : str
-        """
-
-        zip_path = Path(zip_path)
-
-        output_dir = Path(output_dir)
-
-        LOGGER.info("Extracting dataset...")
-
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(output_dir)
-
-        LOGGER.info("Extraction completed.")
-
-    ####################################################################
-    # VALIDATION
-    ####################################################################
-
-    def validate_structure(self) -> bool:
-        """
-        Check dataset folder structure.
-        """
-
-        required = [
-
-            self.train_images,
-            self.train_labels,
-
-            self.valid_images,
-            self.valid_labels,
-
-            self.test_images,
-            self.test_labels
-
-        ]
-
-        missing = []
-
-        for folder in required:
-
-            if not folder.exists():
-
-                missing.append(folder)
-
-        if missing:
-
-            LOGGER.error("Dataset structure is invalid.")
-
-            for folder in missing:
-                LOGGER.error(folder)
-
-            return False
-
-        LOGGER.info("Dataset structure validated.")
-
-        return True
-
-    ####################################################################
-    # COUNT FILES
-    ####################################################################
-
-    @staticmethod
-    def count_files(folder: Path, extension: str) -> int:
-
-        return len(list(folder.glob(f"*.{extension}")))
-
-    ####################################################################
-    # DATASET STATS
-    ####################################################################
-
-    def dataset_statistics(self) -> Dict[str, int]:
-
-        stats = {
-
-            "train_images":
-                self.count_files(self.train_images, "jpg"),
-
-            "train_labels":
-                self.count_files(self.train_labels, "txt"),
-
-            "valid_images":
-                self.count_files(self.valid_images, "jpg"),
-
-            "valid_labels":
-                self.count_files(self.valid_labels, "txt"),
-
-            "test_images":
-                self.count_files(self.test_images, "jpg"),
-
-            "test_labels":
-                self.count_files(self.test_labels, "txt")
-
-        }
-
-        LOGGER.info("Dataset statistics:")
-
-        for k, v in stats.items():
-
-            LOGGER.info(f"{k}: {v}")
-
-        return stats
-
-    ####################################################################
-    # CREATE DATA YAML
-    ####################################################################
-
-    def create_yaml(
-
-        self,
-
-        save_path: str,
-
-        class_names: list[str]
-
+        target_size: Tuple[int, int] | None = None,
+        use_clahe: bool = False,
     ) -> None:
 
-        save_path = Path(save_path)
+        self.target_size = target_size
+        self.use_clahe = use_clahe
 
-        yaml = f"""path: {self.dataset_dir}
+        if use_clahe:
+            self.clahe = cv2.createCLAHE(
+                clipLimit=2.0,
+                tileGridSize=(8, 8),
+            )
 
-train: train/images
+    # ---------------------------------------------------------
 
-val: valid/images
-
-test: test/images
-
-nc: {len(class_names)}
-
-names: {class_names}
-"""
-
-        save_path.write_text(yaml)
-
-        LOGGER.info(f"Saved YAML to {save_path}")
-
-    ####################################################################
-    # REMOVE CACHE
-    ####################################################################
-
-    def remove_cache(self):
-
-        cache = self.dataset_dir / ".cache"
-
-        if cache.exists():
-
-            shutil.rmtree(cache)
-
-            LOGGER.info("Cache removed.")
-
-    ####################################################################
-    # FULL PREPARATION
-    ####################################################################
-
-    def prepare(
-
+    def resize(
         self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Resize frame while preserving aspect ratio.
+        """
 
-        yaml_path: str,
+        if self.target_size is None:
+            return frame
 
-        classes: list[str]
-
-    ) -> None:
-
-        LOGGER.info("Preparing dataset...")
-
-        if not self.validate_structure():
-
-            raise RuntimeError("Dataset structure invalid.")
-
-        self.remove_cache()
-
-        self.dataset_statistics()
-
-        self.create_yaml(
-
-            yaml_path,
-
-            classes
-
+        return cv2.resize(
+            frame,
+            self.target_size,
+            interpolation=cv2.INTER_LINEAR,
         )
 
-        LOGGER.info("Dataset is ready.")
+    # ---------------------------------------------------------
+
+    def bgr_to_rgb(
+        self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Convert BGR to RGB.
+        """
+
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # ---------------------------------------------------------
+
+    def rgb_to_bgr(
+        self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Convert RGB to BGR.
+        """
+
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    # ---------------------------------------------------------
+
+    def normalize(
+        self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Normalize image to [0,1].
+        """
+
+        return frame.astype(np.float32) / 255.0
+
+    # ---------------------------------------------------------
+
+    def denormalize(
+        self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Convert normalized image back to uint8.
+        """
+
+        frame = np.clip(frame * 255, 0, 255)
+
+        return frame.astype(np.uint8)
+
+    # ---------------------------------------------------------
+
+    def enhance_contrast(
+        self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Apply CLAHE contrast enhancement.
+        """
+
+        if not self.use_clahe:
+            return frame
+
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+
+        l, a, b = cv2.split(lab)
+
+        l = self.clahe.apply(l)
+
+        enhanced = cv2.merge((l, a, b))
+
+        return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+
+    # ---------------------------------------------------------
+
+    def crop_roi(
+        self,
+        frame: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+    ) -> np.ndarray:
+        """
+        Crop bounding box region.
+        """
+
+        x1, y1, x2, y2 = bbox
+
+        h, w = frame.shape[:2]
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+
+        return frame[y1:y2, x1:x2]
+
+    # ---------------------------------------------------------
+
+    def preprocess(
+        self,
+        frame: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Complete preprocessing pipeline.
+        """
+
+        frame = self.resize(frame)
+
+        frame = self.enhance_contrast(frame)
+
+        return frame
+
+
+# ======================================================================
+
+
+class VideoReader:
+    """
+    Reads video frame-by-frame.
+    """
+
+    def __init__(self, source: str | int):
+
+        self.cap = cv2.VideoCapture(source)
+
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Cannot open source: {source}")
+
+    # ---------------------------------------------------------
+
+    def frames(self) -> Generator[np.ndarray, None, None]:
+        """
+        Generator returning video frames.
+        """
+
+        while True:
+
+            success, frame = self.cap.read()
+
+            if not success:
+                break
+
+            yield frame
+
+    # ---------------------------------------------------------
+
+    def release(self):
+
+        self.cap.release()
+
+
+# ======================================================================
+
+
+class VideoWriter:
+    """
+    Saves processed videos.
+    """
+
+    def __init__(
+        self,
+        output_path: str,
+        fps: float,
+        frame_size: Tuple[int, int],
+    ) -> None:
+
+        Path(output_path).parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+        self.writer = cv2.VideoWriter(
+            output_path,
+            fourcc,
+            fps,
+            frame_size,
+        )
+
+    # ---------------------------------------------------------
+
+    def write(
+        self,
+        frame: np.ndarray,
+    ) -> None:
+
+        self.writer.write(frame)
+
+    # ---------------------------------------------------------
+
+    def release(self):
+
+        self.writer.release()
+
+
+# ======================================================================
+
+
+def load_image(path: str) -> np.ndarray:
+    """
+    Load image from disk.
+    """
+
+    image = cv2.imread(path)
+
+    if image is None:
+        raise FileNotFoundError(path)
+
+    return image
+
+
+def save_image(
+    path: str,
+    image: np.ndarray,
+) -> None:
+    """
+    Save image.
+    """
+
+    Path(path).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    cv2.imwrite(path, image)
