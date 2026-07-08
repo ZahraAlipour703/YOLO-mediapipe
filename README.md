@@ -1,5 +1,5 @@
 # YOLO-mediapipe
 <p align="center">
-  <img src="figures/wa.png" alt="Project Banner" width="900">
+  <img src="yol.png" alt="Project Banner" width="900">
 </p>
 
